@@ -143,7 +143,14 @@ if (Test-Path $PasswordFile) {
     exit 0
 }
 
-$allArgs = @("--user-data-dir=`"$script:DataDir`"", "--no-first-run") + $BrowserArgs
+#$allArgs = @("--user-data-dir=`"$script:DataDir`"", "--no-first-run") + $BrowserArgs 
+$allArgs = @(
+    "--user-data-dir=`"$script:DataDir`"",
+    "--no-first-run",
+    "--disk-cache-size=104857600",      # 强制常规缓存最大为 100MB
+    "--media-cache-size=52428800",      # 强制音视频缓存最大为 50MB
+    "--disable-gpu-shader-disk-cache"   # 禁用显卡着色器磁盘缓存（非常占空间）
+) + $BrowserArgs
 Write-Host "Launching Secure Edge..." -ForegroundColor Green
 $process = Start-Process -FilePath $EdgeExe -ArgumentList $allArgs -PassThru
 
