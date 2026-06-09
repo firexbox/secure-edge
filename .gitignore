@@ -1,0 +1,21 @@
+# VeraCrypt encrypted container (user data)
+UserData.hc
+
+# VeraCrypt portable binaries
+veracrypt/
+
+# User config / password hash
+config_edge/password_edge.enc
+
+# PowerShell / Windows
+*.lnk
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
