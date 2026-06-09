@@ -223,6 +223,18 @@ if (Test-Path $PasswordFile) {
     exit 0
 }
 
+# 最小化控制台窗口
+try {
+    Add-Type -Name Window -Namespace Console -MemberDefinition '
+        [DllImport("Kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+        [DllImport("User32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    ' -ErrorAction Stop
+    $hwnd = [Console.Window]::GetConsoleWindow()
+    [Console.Window]::ShowWindow($hwnd, 6) | Out-Null
+} catch {
+    Write-Host "Unable to minimize window: $_" -ForegroundColor DarkGray
+}
+
 #$allArgs = @("--user-data-dir=`"$script:DataDir`"", "--no-first-run") + $BrowserArgs
 $allArgs = @(
     "--user-data-dir=`"$script:DataDir`"",
