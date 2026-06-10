@@ -236,13 +236,24 @@ try {
 }
 
 #$allArgs = @("--user-data-dir=`"$script:DataDir`"", "--no-first-run") + $BrowserArgs
+
+# ========================================
+# 通过注册表策略彻底禁用 Edge 翻译（组件更新服务不理会 feature flag）
+# ========================================
+$edgePolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Edge"
+if (-not (Test-Path $edgePolicyPath)) {
+    New-Item -Path $edgePolicyPath -Force | Out-Null
+}
+Set-ItemProperty -Path $edgePolicyPath -Name "TranslateEnabled" -Value 0 -Type DWord -Force
+Write-Host "Edge policy: TranslateEnabled = disabled" -ForegroundColor Cyan
+
 $allArgs = @(
     "--user-data-dir=`"$script:DataDir`"",
     "--no-first-run",
     "--disk-cache-size=104857600",      # 强制常规缓存最大为 100MB
     "--media-cache-size=52428800",      # 强制音视频缓存最大为 50MB
     "--disable-gpu-shader-disk-cache",  # 禁用显卡着色器磁盘缓存（非常占空间）
-    "--disable-features=Translate"      # 禁用内置翻译，阻止 ~600MB 语言包下载
+    "--disable-features=Translate,TranslateUI,EdgeTranslate"  # 多层面禁用翻译+注册表策略，阻止 ~600MB 语言包下载
 ) + $BrowserArgs
 Write-Host "Launching Secure Edge..." -ForegroundColor Green
 $process = Start-Process -FilePath $EdgeExe -ArgumentList $allArgs -PassThru
