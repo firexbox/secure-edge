@@ -258,31 +258,31 @@ $allArgs = @(
 Write-Host "Launching Secure Edge..." -ForegroundColor Green
 $process = Start-Process -FilePath $EdgeExe -ArgumentList $allArgs -PassThru
 
-# 启动加密盘根目录下的附加程序
-if ($UseEncryption) {
-    $encryptedRoot = (Get-PSDrive "Y").Root
-    if (-not $encryptedRoot) { $encryptedRoot = "Y:\" }
-
-    $mihomoBat = Join-Path $encryptedRoot "mh-ep\mihomo-ep_reStart.bat"
-    if (Test-Path $mihomoBat) {
-        Write-Host "Launching mihomo-ep..." -ForegroundColor Green
-        Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"`"$mihomoBat`"`"" -WindowStyle Hidden
-    } else {
-        Write-Host "mihomo-ep not found: $mihomoBat" -ForegroundColor Yellow
-    }
-
-    $electermExe = Join-Path $encryptedRoot "electerm\electerm.exe"
-    if (Test-Path $electermExe) {
-        Write-Host "Launching electerm..." -ForegroundColor Green
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $electermExe
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardError = $true
-        [System.Diagnostics.Process]::Start($psi) | Out-Null
-    } else {
-        Write-Host "electerm not found: $electermExe" -ForegroundColor Yellow
-    }
-}
+# 启动加密盘根目录下的附加程序（已禁用 electerm 和 mh-ep）
+# if ($UseEncryption) {
+#     $encryptedRoot = (Get-PSDrive "Y").Root
+#     if (-not $encryptedRoot) { $encryptedRoot = "Y:\" }
+#
+#     $mihomoBat = Join-Path $encryptedRoot "mh-ep\mihomo-ep_reStart.bat"
+#     if (Test-Path $mihomoBat) {
+#         Write-Host "Launching mihomo-ep..." -ForegroundColor Green
+#         Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"`"$mihomoBat`"`"" -WindowStyle Hidden
+#     } else {
+#         Write-Host "mihomo-ep not found: $mihomoBat" -ForegroundColor Yellow
+#     }
+#
+#     $electermExe = Join-Path $encryptedRoot "electerm\electerm.exe"
+#     if (Test-Path $electermExe) {
+#         Write-Host "Launching electerm..." -ForegroundColor Green
+#         $psi = New-Object System.Diagnostics.ProcessStartInfo
+#         $psi.FileName = $electermExe
+#         $psi.UseShellExecute = $false
+#         $psi.RedirectStandardError = $true
+#         [System.Diagnostics.Process]::Start($psi) | Out-Null
+#     } else {
+#         Write-Host "electerm not found: $electermExe" -ForegroundColor Yellow
+#     }
+# }
 
 if ($UseEncryption) {
     Wait-Process -Id $process.Id -ErrorAction SilentlyContinue
