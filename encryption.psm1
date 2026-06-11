@@ -415,17 +415,17 @@ function Initialize-Encryption {
     }
     
     Write-Host ""
-    Write-Host "Container size selection:" -ForegroundColor Cyan
-    Write-Host "  1. Small (100 MB) - Basic browsing" -ForegroundColor Yellow
-    Write-Host "  2. Medium (200 MB) - Recommended" -ForegroundColor Green
-    Write-Host "  3. Large (500 MB) - Heavy browsing with extensions" -ForegroundColor Cyan
+    Write-Host "Container size selection (only sensitive data - passwords/bookmarks/history/cookies):" -ForegroundColor Cyan
+    Write-Host "  1. Small (50 MB) - Light browsing" -ForegroundColor Yellow
+    Write-Host "  2. Medium (100 MB) - Recommended" -ForegroundColor Green
+    Write-Host "  3. Large (200 MB) - Heavy browsing" -ForegroundColor Cyan
     Write-Host "  4. Custom size" -ForegroundColor Magenta
-    
+
     $sizeChoice = Read-Host "Select option (1-4)"
     switch ($sizeChoice) {
-        "1" { $sizeMB = 100 }
-        "2" { $sizeMB = 200 }
-        "3" { $sizeMB = 500 }
+        "1" { $sizeMB = 50 }
+        "2" { $sizeMB = 100 }
+        "3" { $sizeMB = 200 }
         "4" { 
             $customSize = Read-Host "Enter size in MB (50-2048)"
             if ($customSize -match '^\d+$' -and [int]$customSize -ge $ModuleConfig.MinContainerSizeMB -and [int]$customSize -le $ModuleConfig.MaxContainerSizeMB) {
