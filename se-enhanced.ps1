@@ -1,10 +1,31 @@
 # Secure Edge Launcher for Windows
-# Version 1.5 - Fixed Container Name Mismatch
+# Version 2.4 - Win32 CreateSymbolicLink (no placeholder files needed)
 
 param(
     [Parameter(ValueFromRemainingArguments=$true)]
     [string[]]$Arguments = @()
 )
+
+# Win32 API for creating symlinks (target does NOT need to exist)
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Symlink {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern bool CreateSymbolicLink(string lpSymlinkFileName, string lpTargetFileName, int dwFlags);
+}
+"@
+
+# Auto-elevate to admin (required for file symlinks)
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $argList = @(
+        "-ExecutionPolicy", "Bypass",
+        "-NoProfile",
+        "-File", "`"$($MyInvocation.MyCommand.Path)`""
+    ) + $Arguments
+    Start-Process PowerShell -Verb RunAs -ArgumentList $argList
+    exit
+}
 
 $EncryptionAvailable = $false
 $EncryptionStatus = $null
@@ -32,8 +53,64 @@ $ScriptDir = $PSScriptRoot
 $ConfigDir = Join-Path $ScriptDir "config_edge"
 $PasswordFile = Join-Path $ConfigDir "password_edge.enc"
 $script:DataDir = Join-Path $ScriptDir "EdgeUserData"
-# 【关键修复】：将这里的文件名改回 UserData.hc，以匹配加密模块的输出
+$script:EncryptedDir = $null
 $ContainerPath = Join-Path $ScriptDir "UserData.hc"
+
+# Privacy-sensitive files (file symlinks, dwFlags=0)
+$SensitiveFiles = @(
+    "Default\Login Data",
+    "Default\Login Data-journal",
+    "Default\History",
+    "Default\History-journal",
+    "Default\Bookmarks",
+    "Default\Bookmarks.bak",
+    "Default\Cookies",
+    "Default\Cookies-journal",
+    "Default\Favicons",
+    "Default\Favicons-journal",
+    "Default\Web Data",
+    "Default\Web Data-journal",
+    "Default\Shortcuts",
+    "Default\Shortcuts-journal",
+    "Default\Top Sites",
+    "Default\Top Sites-journal",
+    "Default\Preferences",
+    "Default\Secure Preferences",
+    "Default\Visited Links",
+    "Local State",
+    "Default\Network\TransportSecurity",
+    "Default\Network\Cookies",
+    "Default\Network\Cookies-journal",
+    "Default\Network\Trust Tokens",
+    "Default\Network\Trust Tokens-journal",
+    "Default\Network\Reporting and NEL",
+    "Default\Network\Reporting and NEL-journal",
+    "Default\Network\Network Persistent State",
+    "Default\Network\Device Bound Sessions",
+    "Default\Network\Device Bound Sessions-journal",
+    "Default\Network Action Predictor",
+    "Default\DIPS",
+    "Default\DIPS-journal",
+    "Default\Site Characteristics Database",
+    "Default\Site Characteristics Database-journal",
+    "Default\Safe Browsing Network",
+    "Default\Safe Browsing Network-journal",
+    "Default\Affiliation Database",
+    "Default\Affiliation Database-journal",
+    "Default\heavy_ad_intervention_opt_out.db",
+    "Default\heavy_ad_intervention_opt_out.db-journal"
+)
+
+# Privacy-sensitive directories (directory symlinks, dwFlags=1)
+$SensitiveDirs = @(
+    "Default\Sessions",
+    "Default\Sync Data",
+    "Default\Local Storage",
+    "Default\Storage",
+    "Default\WebStorage",
+    "Default\Shared Dictionary",
+    "Default\Service Worker"
+)
 
 function Find-Edge {
     $paths = @(
@@ -59,102 +136,130 @@ if ($EncryptionAvailable -and $EncryptionStatus) {
     }
 }
 
+function New-SensitiveSymlinks {
+    param()
+    if (-not $script:EncryptedDir) { return $true }
+
+    Write-Host "Linking sensitive data to encrypted drive..." -ForegroundColor Cyan
+
+    foreach ($file in $SensitiveFiles) {
+        $linkPath = Join-Path $script:DataDir $file
+        $targetPath = Join-Path $script:EncryptedDir $file
+
+        $linkParent = Split-Path $linkPath -Parent
+        $targetParent = Split-Path $targetPath -Parent
+        if (-not (Test-Path $linkParent)) { New-Item -ItemType Directory -Path $linkParent -Force | Out-Null }
+        if (-not (Test-Path $targetParent)) { New-Item -ItemType Directory -Path $targetParent -Force | Out-Null }
+
+        $existing = Get-Item $linkPath -Force -ErrorAction SilentlyContinue
+        $attr = 0
+        if ($existing) { $attr = [int]$existing.Attributes }
+        $isReparse = ($attr -band 0x400) -ne 0
+
+        if ($existing -and -not $isReparse) {
+            Write-Host "  Migrating: $file" -ForegroundColor Gray
+            Copy-Item $linkPath $targetPath -Force -ErrorAction SilentlyContinue
+        }
+
+        Remove-Item $linkPath -Force -ErrorAction SilentlyContinue
+
+        if ([Symlink]::CreateSymbolicLink($linkPath, $targetPath, 0)) {
+            Write-Host "  $file" -ForegroundColor Gray
+        } else {
+            Write-Host "  FAILED: $file" -ForegroundColor Red
+            return $false
+        }
+    }
+
+    foreach ($dir in $SensitiveDirs) {
+        $linkPath = Join-Path $script:DataDir $dir
+        $targetPath = Join-Path $script:EncryptedDir $dir
+
+        $linkParent = Split-Path $linkPath -Parent
+        $targetParent = Split-Path $targetPath -Parent
+        if (-not (Test-Path $linkParent)) { New-Item -ItemType Directory -Path $linkParent -Force | Out-Null }
+        if (-not (Test-Path $targetParent)) { New-Item -ItemType Directory -Path $targetParent -Force | Out-Null }
+
+        $existing = Get-Item $linkPath -Force -ErrorAction SilentlyContinue
+        $attr = 0
+        if ($existing) { $attr = [int]$existing.Attributes }
+        $isReparse = ($attr -band 0x400) -ne 0
+
+        if ($existing -and -not $isReparse) {
+            Write-Host "  Migrating dir: $dir" -ForegroundColor Gray
+            New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+            Start-Process -FilePath "robocopy.exe" -ArgumentList @(
+                "`"$linkPath`"", "`"$targetPath`"",
+                "/E", "/MOVE", "/R:0", "/W:0",
+                "/NFL", "/NDL", "/NJH", "/NJS"
+            ) -Wait -NoNewWindow
+            Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Remove-Item $linkPath -Force -ErrorAction SilentlyContinue
+        }
+
+        if (-not (Test-Path $targetPath)) {
+            New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+        }
+
+        if ([Symlink]::CreateSymbolicLink($linkPath, $targetPath, 1)) {
+            Write-Host "  $dir\" -ForegroundColor Gray
+        } else {
+            Write-Host "  FAILED: $dir" -ForegroundColor Red
+            return $false
+        }
+    }
+
+    Write-Host "Symlinks ready." -ForegroundColor Green
+    return $true
+}
+
 function Mount-EncryptedDataDir {
     param([Parameter(Mandatory=$true)][System.Security.SecureString]$Password)
     $mountedPath = Mount-Container -ContainerPath $ContainerPath -Password $Password -DriveLetter "Y"
-    if ($mountedPath) {
-        $script:DataDir = Join-Path $mountedPath "SecureEdge"
-        if (-not (Test-Path $script:DataDir)) {
-            New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
-        }
-        return $true
-    }
-    return $false
-}
+    if (-not $mountedPath) { return $false }
 
-function Clear-EdgeCache {
-    param([string]$EdgeDataDir)
-    if (-not $EdgeDataDir -or -not (Test-Path $EdgeDataDir)) { return }
+    Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
 
-    Write-Host "Cleaning Edge cache to reduce container size..." -ForegroundColor Cyan
-    $cachePaths = @(
-        # GPU / Shader caches
-        "$EdgeDataDir\Default\Cache",
-        "$EdgeDataDir\Default\Code Cache",
-        "$EdgeDataDir\Default\DawnWebGPUCache",
-        "$EdgeDataDir\Default\DawnGraphiteCache",
-        "$EdgeDataDir\Default\GPUCache",
-        "$EdgeDataDir\Default\image_cache",
-        "$EdgeDataDir\GrShaderCache",
-        "$EdgeDataDir\ShaderCache",
-        "$EdgeDataDir\GraphiteDawnCache",
-        # Service Worker / Storage temp
-        "$EdgeDataDir\Default\Service Worker",
-        "$EdgeDataDir\Default\Session Storage",
-        "$EdgeDataDir\Default\shared_proto_db",
-        # Jump list icons
-        "$EdgeDataDir\Default\JumpListIconsRecentClosed",
-        "$EdgeDataDir\Default\JumpListIconsTopSites",
-        # Media / Optimization
-        "$EdgeDataDir\Default\VideoDecodeStats",
-        "$EdgeDataDir\Default\optimization_guide_hint_cache_store",
-        "$EdgeDataDir\Default\MediaFoundationWidevineCdm",
-        # Component / Extension crx
-        "$EdgeDataDir\component_crx_cache",
-        # Metrics / Crash
-        "$EdgeDataDir\BrowserMetrics",
-        "$EdgeDataDir\BrowserMetrics-spare.pma",
-        "$EdgeDataDir\Crashpad",
-        # Edge 内部组件缓存
-        "$EdgeDataDir\Subresource Filter",
-        "$EdgeDataDir\SafetyTips",
-        "$EdgeDataDir\Crowd Deny",
-        "$EdgeDataDir\FileTypePolicies",
-        "$EdgeDataDir\FirstPartySetsPreloaded",
-        "$EdgeDataDir\TrustTokenKeyCommitments",
-        "$EdgeDataDir\TpcdMetadata",
-        "$EdgeDataDir\ZxcvbnData",
-        "$EdgeDataDir\OriginTrials",
-        "$EdgeDataDir\AutofillStates",
-        "$EdgeDataDir\hyphen-data",
-        "$EdgeDataDir\PKIMetadata",
-        "$EdgeDataDir\WidevineCdm",
-        "$EdgeDataDir\MEIPreload",
-        # Edge 功能组件数据（按需自动重建，共约 640 MB）
-        "$EdgeDataDir\EdgeTranslateKitLanguagePack",
-        "$EdgeDataDir\EdgeLLMRuntime",
-        "$EdgeDataDir\Edge Shopping",
-        "$EdgeDataDir\Safe Browsing",
-        "$EdgeDataDir\EdgeLanguageDetectionModel",
-        "$EdgeDataDir\Speech Recognition",
-        "$EdgeDataDir\Edge Sidebar",
-        "$EdgeDataDir\Edge Signal Triggers",
-        "$EdgeDataDir\Edge Entity Extraction",
-        "$EdgeDataDir\SmartScreen",
-        "$EdgeDataDir\Well Known Domains",
-        "$EdgeDataDir\Typosquatting"
-    )
-    $freed = 0
-    foreach ($p in $cachePaths) {
-        $resolved = [System.IO.Path]::GetFullPath($p)
-        if (Test-Path $resolved) {
-            try {
-                $size = (Get-ChildItem $resolved -Recurse -File -ErrorAction Stop | Measure-Object -Property Length -Sum).Sum
-                Remove-Item $resolved -Recurse -Force -ErrorAction Stop
-                $freed += $size
-                Write-Host "  Cleaned: $([System.IO.Path]::GetFileName($resolved)) ($([math]::Round($size/1MB, 1)) MB)" -ForegroundColor Gray
-            } catch {
-                Write-Host "  Skipped (locked): $([System.IO.Path]::GetFileName($resolved))" -ForegroundColor DarkGray
-            }
-        }
+    $script:EncryptedDir = Join-Path $mountedPath "SecureProfile"
+    if (-not (Test-Path $script:EncryptedDir)) {
+        New-Item -ItemType Directory -Path $script:EncryptedDir -Force | Out-Null
     }
-    Write-Host "Cache cleanup freed $([math]::Round($freed/1MB, 1)) MB" -ForegroundColor Green
+
+    $existing = Get-Item $script:DataDir -Force -ErrorAction SilentlyContinue
+    if ($existing -and ($existing.Attributes -band 0x400)) {
+        Write-Host "Removing junction..." -ForegroundColor Yellow
+        Remove-Item $script:DataDir -Force
+        New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
+    }
+    if (-not (Test-Path $script:DataDir)) {
+        New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
+    }
+
+    $oldDir = Join-Path $mountedPath "SecureEdge"
+    if (Test-Path $oldDir) {
+        Write-Host "Migrating v2.2 data..." -ForegroundColor Yellow
+        Start-Process -FilePath "robocopy.exe" -ArgumentList @(
+            "`"$oldDir`"", "`"$script:EncryptedDir`"",
+            "/E", "/MOVE", "/R:0", "/W:0",
+            "/NFL", "/NDL", "/NJH", "/NJS"
+        ) -Wait -NoNewWindow
+        Remove-Item $oldDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not (New-SensitiveSymlinks)) {
+        Write-Host "Symlink creation failed." -ForegroundColor Red
+        Dismount-Container -DriveLetter "Y" -Force
+        return $false
+    }
+
+    return $true
 }
 
 function Dismount-EncryptedDataDir {
     if ($EncryptionAvailable -and (Test-ContainerMounted -DriveLetter "Y")) {
-        Clear-EdgeCache -EdgeDataDir $script:DataDir
-        Write-Host "Dismounting Edge container safely..." -ForegroundColor Yellow
+        Write-Host "Dismounting..." -ForegroundColor Yellow
         $retries = 0
         while ($retries -lt 5) {
             if (Dismount-Container -DriveLetter "Y") { return $true }
@@ -165,8 +270,6 @@ function Dismount-EncryptedDataDir {
     }
     return $true
 }
-
-Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { Dismount-EncryptedDataDir } | Out-Null
 
 $BrowserArgs = @()
 $doSetupPassword = $false
@@ -192,19 +295,19 @@ if ($doSetupEncryption) {
 }
 
 $EdgeExe = Find-Edge
-if (-not $EdgeExe) { 
+if (-not $EdgeExe) {
     Write-Host "ERROR: Microsoft Edge not found." -ForegroundColor Red
-    exit 1 
+    exit 1
 }
 
 if (Test-Path $PasswordFile) {
     $password = Read-Host "Enter Edge secure password" -AsSecureString
     if (-not $password) { exit 1 }
-    
+
     $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($password)
     $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
     [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
-    
+
     $storedHash = (Get-Content $PasswordFile -Raw).Trim()
     $hasher = [System.Security.Cryptography.SHA256]::Create()
     $inputHash = [System.BitConverter]::ToString($hasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($plainPassword))).Replace("-", "").ToLower()
@@ -214,7 +317,7 @@ if (Test-Path $PasswordFile) {
         Write-Host "Incorrect password." -ForegroundColor Red
         exit 1
     }
-    
+
     if ($UseEncryption) {
         if (-not (Mount-EncryptedDataDir -Password $password)) { exit 1 }
     }
@@ -223,7 +326,6 @@ if (Test-Path $PasswordFile) {
     exit 0
 }
 
-# 最小化控制台窗口
 try {
     Add-Type -Name Window -Namespace Console -MemberDefinition '
         [DllImport("Kernel32.dll")] public static extern IntPtr GetConsoleWindow();
@@ -231,60 +333,27 @@ try {
     ' -ErrorAction Stop
     $hwnd = [Console.Window]::GetConsoleWindow()
     [Console.Window]::ShowWindow($hwnd, 6) | Out-Null
-} catch {
-    Write-Host "Unable to minimize window: $_" -ForegroundColor DarkGray
-}
-
-#$allArgs = @("--user-data-dir=`"$script:DataDir`"", "--no-first-run") + $BrowserArgs
-
-# ========================================
-# 通过注册表策略彻底禁用 Edge 翻译（组件更新服务不理会 feature flag）
-# ========================================
-$edgePolicyPath = "HKCU:\SOFTWARE\Policies\Microsoft\Edge"
-if (-not (Test-Path $edgePolicyPath)) {
-    New-Item -Path $edgePolicyPath -Force | Out-Null
-}
-Set-ItemProperty -Path $edgePolicyPath -Name "TranslateEnabled" -Value 0 -Type DWord -Force
-Write-Host "Edge policy: TranslateEnabled = disabled" -ForegroundColor Cyan
+} catch {}
 
 $allArgs = @(
     "--user-data-dir=`"$script:DataDir`"",
     "--no-first-run",
-    "--disk-cache-size=104857600",      # 强制常规缓存最大为 100MB
-    "--media-cache-size=52428800",      # 强制音视频缓存最大为 50MB
-    "--disable-gpu-shader-disk-cache",  # 禁用显卡着色器磁盘缓存（非常占空间）
-    "--disable-features=Translate,TranslateUI,EdgeTranslate"  # 多层面禁用翻译+注册表策略，阻止 ~600MB 语言包下载
+    "--disk-cache-size=104857600",
+    "--media-cache-size=52428800",
+    "--disable-gpu-shader-disk-cache"
 ) + $BrowserArgs
 Write-Host "Launching Secure Edge..." -ForegroundColor Green
-$process = Start-Process -FilePath $EdgeExe -ArgumentList $allArgs -PassThru
-
-# 启动加密盘根目录下的附加程序（已禁用 electerm 和 mh-ep）
-# if ($UseEncryption) {
-#     $encryptedRoot = (Get-PSDrive "Y").Root
-#     if (-not $encryptedRoot) { $encryptedRoot = "Y:\" }
-#
-#     $mihomoBat = Join-Path $encryptedRoot "mh-ep\mihomo-ep_reStart.bat"
-#     if (Test-Path $mihomoBat) {
-#         Write-Host "Launching mihomo-ep..." -ForegroundColor Green
-#         Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"`"$mihomoBat`"`"" -WindowStyle Hidden
-#     } else {
-#         Write-Host "mihomo-ep not found: $mihomoBat" -ForegroundColor Yellow
-#     }
-#
-#     $electermExe = Join-Path $encryptedRoot "electerm\electerm.exe"
-#     if (Test-Path $electermExe) {
-#         Write-Host "Launching electerm..." -ForegroundColor Green
-#         $psi = New-Object System.Diagnostics.ProcessStartInfo
-#         $psi.FileName = $electermExe
-#         $psi.UseShellExecute = $false
-#         $psi.RedirectStandardError = $true
-#         [System.Diagnostics.Process]::Start($psi) | Out-Null
-#     } else {
-#         Write-Host "electerm not found: $electermExe" -ForegroundColor Yellow
-#     }
-# }
+Start-Process -FilePath $EdgeExe -ArgumentList $allArgs | Out-Null
 
 if ($UseEncryption) {
-    Wait-Process -Id $process.Id -ErrorAction SilentlyContinue
-    Dismount-EncryptedDataDir
+    Write-Host "Edge is running. Close all Edge windows to lock the encrypted drive." -ForegroundColor Cyan
+    do {
+        Start-Sleep -Seconds 3
+        $hasWindow = Get-Process msedge -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }
+    } while ($hasWindow)
+    Write-Host "Edge windows closed." -ForegroundColor Green
+    Start-Sleep -Seconds 5
+    Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    Dismount-Container -DriveLetter "Y" -Force
 }
