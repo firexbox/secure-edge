@@ -321,15 +321,12 @@ $allArgs = @(
     "--media-cache-size=52428800"
 ) + $BrowserArgs
 Write-Host "Launching Secure Edge..." -ForegroundColor Green
-Start-Process -FilePath $EdgeExe -ArgumentList $allArgs | Out-Null
+$EdgeProcess = Start-Process -FilePath $EdgeExe -ArgumentList $allArgs -PassThru
 
 if ($UseEncryption) {
-    Write-Host "Edge is running. Close all Edge windows to lock the encrypted drive." -ForegroundColor Cyan
-    do {
-        Start-Sleep -Seconds 3
-        $hasWindow = Get-Process msedge -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }
-    } while ($hasWindow)
-    Write-Host "Edge windows closed." -ForegroundColor Green
+    Write-Host "Edge is running. Close all Secure Edge windows to lock the encrypted drive." -ForegroundColor Cyan
+    $EdgeProcess.WaitForExit()
+    Write-Host "Secure Edge closed." -ForegroundColor Green
     Start-Sleep -Seconds 5
     Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
