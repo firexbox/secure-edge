@@ -67,6 +67,9 @@ $LocalCacheDirs = @(
     "Default\Code Cache",
     "Default\AutofillAiModelCache",
     "Default\optimization_guide_hint_cache_store",
+    "Default\DawnGraphiteCache",
+    "Default\DawnWebGPUCache",
+    "Default\GPUCache",
     "GPUPersistentCache",
     "extensions_crx_cache",
     "component_crx_cache"
@@ -205,6 +208,14 @@ function Mount-EncryptedDataDir {
             "/E", "/MOVE", "/R:0", "/W:0",
             "/NFL", "/NDL", "/NJH", "/NJS"
         ) -Wait -NoNewWindow
+
+        # Clean up leftover symlinks and empty directories from migration
+        Get-ChildItem $LocalDataDir -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object { ($_.Attributes -band 0x400) -ne 0 } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Get-ChildItem $LocalDataDir -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { (Get-ChildItem $_.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0 } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     # Ensure local directory exists for cache targets
