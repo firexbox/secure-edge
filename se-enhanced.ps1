@@ -321,11 +321,15 @@ $allArgs = @(
     "--media-cache-size=52428800"
 ) + $BrowserArgs
 Write-Host "Launching Secure Edge..." -ForegroundColor Green
-$EdgeProcess = Start-Process -FilePath $EdgeExe -ArgumentList $allArgs -PassThru
+Start-Process -FilePath $EdgeExe -ArgumentList $allArgs | Out-Null
 
 if ($UseEncryption) {
-    Write-Host "Edge is running. Close all Secure Edge windows to lock the encrypted drive." -ForegroundColor Cyan
-    $EdgeProcess.WaitForExit()
+    Write-Host "Secure Edge is running. Close all Secure Edge windows to lock the encrypted drive." -ForegroundColor Cyan
+    do {
+        Start-Sleep -Seconds 3
+        $ourProcesses = Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" |
+            Where-Object { $_.CommandLine -like "*--user-data-dir=`"$script:DataDir`"*" }
+    } while ($ourProcesses)
     Write-Host "Secure Edge closed." -ForegroundColor Green
     Start-Sleep -Seconds 5
     Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
