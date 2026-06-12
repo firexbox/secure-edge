@@ -7,8 +7,8 @@ veracrypt/
 # User config / password hash
 config_edge/password_edge.enc
 
-# Local Edge cache (disposable, symlinked from EdgeUserData)
-EdgeCache/
+# Local Edge user data (runtime, not tracked)
+EdgeUserData/
 
 # PowerShell / Windows
 *.lnk

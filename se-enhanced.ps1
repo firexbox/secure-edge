@@ -1,5 +1,5 @@
 # Secure Edge Launcher for Windows
-# Version 2.5 - Local cache offloading + Win32 CreateSymbolicLink
+# Version 2.6 - Encrypted root + local cache offloading
 
 param(
     [Parameter(ValueFromRemainingArguments=$true)]
@@ -52,71 +52,16 @@ if (Test-Path $EncryptionModule) {
 $ScriptDir = $PSScriptRoot
 $ConfigDir = Join-Path $ScriptDir "config_edge"
 $PasswordFile = Join-Path $ConfigDir "password_edge.enc"
-$script:DataDir = Join-Path $ScriptDir "EdgeUserData"
-$script:EncryptedDir = $null
 $ContainerPath = Join-Path $ScriptDir "UserData.hc"
 
-# Privacy-sensitive files (file symlinks, dwFlags=0)
-$SensitiveFiles = @(
-    "Default\Login Data",
-    "Default\Login Data-journal",
-    "Default\History",
-    "Default\History-journal",
-    "Default\Bookmarks",
-    "Default\Bookmarks.bak",
-    "Default\Cookies",
-    "Default\Cookies-journal",
-    "Default\Favicons",
-    "Default\Favicons-journal",
-    "Default\Web Data",
-    "Default\Web Data-journal",
-    "Default\Shortcuts",
-    "Default\Shortcuts-journal",
-    "Default\Top Sites",
-    "Default\Top Sites-journal",
-    "Default\Preferences",
-    "Default\Secure Preferences",
-    "Default\Visited Links",
-    "Local State",
-    "Default\Network\TransportSecurity",
-    "Default\Network\Cookies",
-    "Default\Network\Cookies-journal",
-    "Default\Network\Trust Tokens",
-    "Default\Network\Trust Tokens-journal",
-    "Default\Network\Reporting and NEL",
-    "Default\Network\Reporting and NEL-journal",
-    "Default\Network\Network Persistent State",
-    "Default\Network\Device Bound Sessions",
-    "Default\Network\Device Bound Sessions-journal",
-    "Default\Network Action Predictor",
-    "Default\DIPS",
-    "Default\DIPS-journal",
-    "Default\Site Characteristics Database-journal",
-    "Default\Safe Browsing Network",
-    "Default\Safe Browsing Network-journal",
-    "Default\Affiliation Database",
-    "Default\Affiliation Database-journal",
-    "Default\heavy_ad_intervention_opt_out.db",
-    "Default\heavy_ad_intervention_opt_out.db-journal"
-)
+# Local data directory (always on launch disk, stores only disposable cache)
+$LocalDataDir = Join-Path $ScriptDir "EdgeUserData"
 
-# Privacy-sensitive directories (directory symlinks, dwFlags=1)
-$SensitiveDirs = @(
-    "Default\Sessions",
-    "Default\Sync Data",
-    "Default\Local Storage",
-    "Default\Storage",
-    "Default\WebStorage",
-    "Default\Shared Dictionary",
-    "Default\Service Worker",
-    "Default\Site Characteristics Database"
-)
+# Edge user data root — defaults to local; overridden to Y:\EdgeUserData when encrypted
+$script:DataDir = $LocalDataDir
 
-# Local cache root directory (on launch script disk, not encrypted)
-$LocalCacheRoot = Join-Path $ScriptDir "EdgeCache"
-
-# Cache directories symlinked to local disk (dwFlags=1, directory symlinks)
-# These can grow >100MB and are disposable -- keeping them off the encrypted volume
+# Cache directories symlinked from encrypted drive to local disk (dwFlags=1)
+# These can grow >100MB and are non-private/disposable
 $LocalCacheDirs = @(
     "Default\Cache",
     "Default\Code Cache",
@@ -151,96 +96,14 @@ if ($EncryptionAvailable -and $EncryptionStatus) {
     }
 }
 
-function New-SensitiveSymlinks {
-    param()
-    if (-not $script:EncryptedDir) { return $true }
-
-    Write-Host "Linking sensitive data to encrypted drive..." -ForegroundColor Cyan
-
-    foreach ($file in $SensitiveFiles) {
-        $linkPath = Join-Path $script:DataDir $file
-        $targetPath = Join-Path $script:EncryptedDir $file
-
-        $linkParent = Split-Path $linkPath -Parent
-        $targetParent = Split-Path $targetPath -Parent
-        if (-not (Test-Path $linkParent)) { New-Item -ItemType Directory -Path $linkParent -Force | Out-Null }
-        if (-not (Test-Path $targetParent)) { New-Item -ItemType Directory -Path $targetParent -Force | Out-Null }
-
-        $existing = Get-Item $linkPath -Force -ErrorAction SilentlyContinue
-        $attr = 0
-        if ($existing) { $attr = [int]$existing.Attributes }
-        $isReparse = ($attr -band 0x400) -ne 0
-
-        if ($existing -and -not $isReparse) {
-            Write-Host "  Migrating: $file" -ForegroundColor Gray
-            Copy-Item $linkPath $targetPath -Force -ErrorAction SilentlyContinue
-        }
-
-        Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
-
-        if ([Symlink]::CreateSymbolicLink($linkPath, $targetPath, 0)) {
-            Write-Host "  $file" -ForegroundColor Gray
-        } else {
-            Write-Host "  FAILED: $file" -ForegroundColor Red
-            return $false
-        }
-    }
-
-    foreach ($dir in $SensitiveDirs) {
-        $linkPath = Join-Path $script:DataDir $dir
-        $targetPath = Join-Path $script:EncryptedDir $dir
-
-        $linkParent = Split-Path $linkPath -Parent
-        $targetParent = Split-Path $targetPath -Parent
-        if (-not (Test-Path $linkParent)) { New-Item -ItemType Directory -Path $linkParent -Force | Out-Null }
-        if (-not (Test-Path $targetParent)) { New-Item -ItemType Directory -Path $targetParent -Force | Out-Null }
-
-        $existing = Get-Item $linkPath -Force -ErrorAction SilentlyContinue
-        $attr = 0
-        if ($existing) { $attr = [int]$existing.Attributes }
-        $isReparse = ($attr -band 0x400) -ne 0
-
-        if ($existing -and -not $isReparse) {
-            Write-Host "  Migrating dir: $dir" -ForegroundColor Gray
-            New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
-            Start-Process -FilePath "robocopy.exe" -ArgumentList @(
-                "`"$linkPath`"", "`"$targetPath`"",
-                "/E", "/MOVE", "/R:0", "/W:0",
-                "/NFL", "/NDL", "/NJH", "/NJS"
-            ) -Wait -NoNewWindow
-            Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
-        } else {
-            Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
-        }
-
-        if (-not (Test-Path $targetPath)) {
-            New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
-        }
-
-        if ([Symlink]::CreateSymbolicLink($linkPath, $targetPath, 1)) {
-            Write-Host "  $dir\" -ForegroundColor Gray
-        } else {
-            Write-Host "  FAILED: $dir" -ForegroundColor Red
-            return $false
-        }
-    }
-
-    Write-Host "Symlinks ready." -ForegroundColor Green
-    return $true
-}
-
 function New-LocalCacheSymlinks {
     param()
 
     Write-Host "Linking cache directories to local disk..." -ForegroundColor Cyan
 
-    if (-not (Test-Path $LocalCacheRoot)) {
-        New-Item -ItemType Directory -Path $LocalCacheRoot -Force | Out-Null
-    }
-
     foreach ($dir in $LocalCacheDirs) {
         $linkPath = Join-Path $script:DataDir $dir
-        $targetPath = Join-Path $LocalCacheRoot $dir
+        $targetPath = Join-Path $LocalDataDir $dir
 
         $linkParent = Split-Path $linkPath -Parent
         $targetParent = Split-Path $targetPath -Parent
@@ -260,7 +123,7 @@ function New-LocalCacheSymlinks {
             Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
         }
         elseif ($existing -and -not $isReparse) {
-            Write-Host "  Migrating cache: $dir" -ForegroundColor Gray
+            Write-Host "  Moving cache to local: $dir" -ForegroundColor Gray
             if (-not (Test-Path $targetPath)) {
                 New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
             }
@@ -277,7 +140,7 @@ function New-LocalCacheSymlinks {
         }
 
         if ([Symlink]::CreateSymbolicLink($linkPath, $targetPath, 1)) {
-            Write-Host "  $dir  ->  EdgeCache\" -ForegroundColor Gray
+            Write-Host "  $dir  ->  local" -ForegroundColor Gray
         } else {
             $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
             Write-Host "  FAILED: $dir (Win32 error $err)" -ForegroundColor Red
@@ -297,34 +160,64 @@ function Mount-EncryptedDataDir {
     Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 
-    $script:EncryptedDir = Join-Path $mountedPath "SecureProfile"
-    if (-not (Test-Path $script:EncryptedDir)) {
-        New-Item -ItemType Directory -Path $script:EncryptedDir -Force | Out-Null
+    $EncryptedDataDir = Join-Path $mountedPath "EdgeUserData"
+    if (-not (Test-Path $EncryptedDataDir)) {
+        New-Item -ItemType Directory -Path $EncryptedDataDir -Force | Out-Null
     }
 
-    $existing = Get-Item $script:DataDir -Force -ErrorAction SilentlyContinue
-    if ($existing -and ($existing.Attributes -band 0x400)) {
-        Write-Host "Removing junction..." -ForegroundColor Yellow
-        Remove-Item $script:DataDir -Force
-        New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
-    }
-    if (-not (Test-Path $script:DataDir)) {
-        New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null
-    }
-
-    $oldDir = Join-Path $mountedPath "SecureEdge"
-    if (Test-Path $oldDir) {
-        Write-Host "Migrating v2.2 data..." -ForegroundColor Yellow
+    # Migrate old v2.5 SecureProfile data
+    $oldProfile = Join-Path $mountedPath "SecureProfile"
+    if (Test-Path $oldProfile) {
+        Write-Host "Migrating v2.5 data..." -ForegroundColor Yellow
         Start-Process -FilePath "robocopy.exe" -ArgumentList @(
-            "`"$oldDir`"", "`"$script:EncryptedDir`"",
+            "`"$oldProfile`"", "`"$EncryptedDataDir`"",
             "/E", "/MOVE", "/R:0", "/W:0",
             "/NFL", "/NDL", "/NJH", "/NJS"
         ) -Wait -NoNewWindow
-        Remove-Item $oldDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $oldProfile -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    if (-not (New-SensitiveSymlinks)) {
-        Write-Host "Symlink creation failed." -ForegroundColor Red
+    # Migrate old v2.2 SecureEdge data
+    $oldEdge = Join-Path $mountedPath "SecureEdge"
+    if (Test-Path $oldEdge) {
+        Write-Host "Migrating v2.2 data..." -ForegroundColor Yellow
+        Start-Process -FilePath "robocopy.exe" -ArgumentList @(
+            "`"$oldEdge`"", "`"$EncryptedDataDir`"",
+            "/E", "/MOVE", "/R:0", "/W:0",
+            "/NFL", "/NDL", "/NJH", "/NJS"
+        ) -Wait -NoNewWindow
+        Remove-Item $oldEdge -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # Migrate local EdgeUserData to encrypted drive (if it's a real directory)
+    $existing = Get-Item $LocalDataDir -Force -ErrorAction SilentlyContinue
+    $isReparse = $false
+    if ($existing) { $isReparse = ($existing.Attributes -band 0x400) -ne 0 }
+
+    if ($isReparse) {
+        Write-Host "Removing old symlink..." -ForegroundColor Yellow
+        Remove-Item $LocalDataDir -Recurse -Force
+    }
+    elseif ($existing) {
+        Write-Host "Migrating local user data to encrypted drive..." -ForegroundColor Cyan
+        Start-Process -FilePath "robocopy.exe" -ArgumentList @(
+            "`"$LocalDataDir`"", "`"$EncryptedDataDir`"",
+            "/E", "/MOVE", "/R:0", "/W:0",
+            "/NFL", "/NDL", "/NJH", "/NJS"
+        ) -Wait -NoNewWindow
+    }
+
+    # Ensure local directory exists for cache targets
+    if (-not (Test-Path $LocalDataDir)) {
+        New-Item -ItemType Directory -Path $LocalDataDir -Force | Out-Null
+    }
+
+    # Override DataDir to encrypted location
+    $script:DataDir = $EncryptedDataDir
+
+    # Create cache symlinks (Y: → local)
+    if (-not (New-LocalCacheSymlinks)) {
+        Write-Host "Cache symlink creation failed." -ForegroundColor Red
         Dismount-Container -DriveLetter "Y" -Force
         return $false
     }
@@ -399,12 +292,6 @@ if (Test-Path $PasswordFile) {
 } else {
     Write-Host "No password set. Run 'se.bat --setup-password' first." -ForegroundColor Yellow
     exit 0
-}
-
-# Set up local cache symlinks (runs regardless of encryption)
-if (-not (New-LocalCacheSymlinks)) {
-    Write-Host "WARNING: Some cache directories could not be linked to local disk." -ForegroundColor Yellow
-    Write-Host "Edge will still launch, but cache may consume encrypted volume space." -ForegroundColor Yellow
 }
 
 try {
