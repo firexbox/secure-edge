@@ -91,7 +91,6 @@ $SensitiveFiles = @(
     "Default\Network Action Predictor",
     "Default\DIPS",
     "Default\DIPS-journal",
-    "Default\Site Characteristics Database",
     "Default\Site Characteristics Database-journal",
     "Default\Safe Browsing Network",
     "Default\Safe Browsing Network-journal",
@@ -109,7 +108,8 @@ $SensitiveDirs = @(
     "Default\Storage",
     "Default\WebStorage",
     "Default\Shared Dictionary",
-    "Default\Service Worker"
+    "Default\Service Worker",
+    "Default\Site Characteristics Database"
 )
 
 function Find-Edge {
@@ -161,7 +161,7 @@ function New-SensitiveSymlinks {
             Copy-Item $linkPath $targetPath -Force -ErrorAction SilentlyContinue
         }
 
-        Remove-Item $linkPath -Force -ErrorAction SilentlyContinue
+        Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
 
         if ([Symlink]::CreateSymbolicLink($linkPath, $targetPath, 0)) {
             Write-Host "  $file" -ForegroundColor Gray
@@ -195,7 +195,7 @@ function New-SensitiveSymlinks {
             ) -Wait -NoNewWindow
             Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
         } else {
-            Remove-Item $linkPath -Force -ErrorAction SilentlyContinue
+            Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
         }
 
         if (-not (Test-Path $targetPath)) {
