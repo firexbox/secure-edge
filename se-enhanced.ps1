@@ -1,5 +1,5 @@
 # Secure Edge Launcher for Windows
-# Version 2.6 - Encrypted root + local cache offloading
+# Version 2.7 - Three-mode storage: full encryption / encrypted root + local cache / local root + encrypted privacy
 
 param(
     [Parameter(ValueFromRemainingArguments=$true)]
@@ -53,12 +53,71 @@ $ScriptDir = $PSScriptRoot
 $ConfigDir = Join-Path $ScriptDir "config_edge"
 $PasswordFile = Join-Path $ConfigDir "password_edge.enc"
 $ContainerPath = Join-Path $ScriptDir "UserData.hc"
+$ModeFile = Join-Path $ConfigDir "mode.cfg"
 
-# Local data directory (always on launch disk, stores only disposable cache)
+# Local data directory (always on launch disk)
 $LocalDataDir = Join-Path $ScriptDir "EdgeUserData"
 
-# Edge user data root — defaults to local; overridden to Y:\EdgeUserData when encrypted
+# Edge user data root — defaults to local; overridden based on mode
 $script:DataDir = $LocalDataDir
+$script:EncryptedDir = $null
+$Mode = $null  # 1=full encryption, 2=encrypted root+local cache, 3=local root+encrypted privacy
+
+# Mode 3 — Privacy-sensitive files (file symlinks to encrypted drive, dwFlags=0)
+$SensitiveFiles = @(
+    "Default\Login Data",
+    "Default\Login Data-journal",
+    "Default\History",
+    "Default\History-journal",
+    "Default\Bookmarks",
+    "Default\Bookmarks.bak",
+    "Default\Cookies",
+    "Default\Cookies-journal",
+    "Default\Favicons",
+    "Default\Favicons-journal",
+    "Default\Web Data",
+    "Default\Web Data-journal",
+    "Default\Shortcuts",
+    "Default\Shortcuts-journal",
+    "Default\Top Sites",
+    "Default\Top Sites-journal",
+    "Default\Preferences",
+    "Default\Secure Preferences",
+    "Default\Visited Links",
+    "Local State",
+    "Default\Network\TransportSecurity",
+    "Default\Network\Cookies",
+    "Default\Network\Cookies-journal",
+    "Default\Network\Trust Tokens",
+    "Default\Network\Trust Tokens-journal",
+    "Default\Network\Reporting and NEL",
+    "Default\Network\Reporting and NEL-journal",
+    "Default\Network\Network Persistent State",
+    "Default\Network\Device Bound Sessions",
+    "Default\Network\Device Bound Sessions-journal",
+    "Default\Network Action Predictor",
+    "Default\DIPS",
+    "Default\DIPS-journal",
+    "Default\Site Characteristics Database-journal",
+    "Default\Safe Browsing Network",
+    "Default\Safe Browsing Network-journal",
+    "Default\Affiliation Database",
+    "Default\Affiliation Database-journal",
+    "Default\heavy_ad_intervention_opt_out.db",
+    "Default\heavy_ad_intervention_opt_out.db-journal"
+)
+
+# Mode 3 — Privacy-sensitive directories (directory symlinks to encrypted drive, dwFlags=1)
+$SensitiveDirs = @(
+    "Default\Sessions",
+    "Default\Sync Data",
+    "Default\Local Storage",
+    "Default\Storage",
+    "Default\WebStorage",
+    "Default\Shared Dictionary",
+    "Default\Service Worker",
+    "Default\Site Characteristics Database"
+)
 
 # Cache directories symlinked from encrypted drive to local disk (dwFlags=1)
 # These can grow >100MB and are non-private/disposable
@@ -74,6 +133,49 @@ $LocalCacheDirs = @(
     "extensions_crx_cache",
     "component_crx_cache"
 )
+
+function Get-SavedMode {
+    if (Test-Path $ModeFile) {
+        $content = (Get-Content $ModeFile -Raw).Trim()
+        if ($content -match '^[123]$') { return [int]$content }
+    }
+    return $null
+}
+
+function Set-Mode {
+    param([Parameter(Mandatory=$true)][int]$Mode)
+    if (-not (Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null }
+    $Mode | Out-File $ModeFile -NoNewline
+}
+
+function Select-Mode {
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  Secure Edge — Storage Mode Setup" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  [1] Full Encryption" -ForegroundColor White
+    Write-Host "      All Edge data stored on encrypted drive." -ForegroundColor Gray
+    Write-Host "      Safest option — needs enough encrypted volume space." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  [2] Encrypted Root + Local Cache  (recommended)" -ForegroundColor White
+    Write-Host "      Core data on encrypted drive, large caches on local disk." -ForegroundColor Gray
+    Write-Host "      Good balance of security and space efficiency." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  [3] Local Root + Encrypted Privacy" -ForegroundColor White
+    Write-Host "      Data on local disk, only privacy-sensitive files encrypted." -ForegroundColor Gray
+    Write-Host "      Best performance, minimal encrypted volume usage." -ForegroundColor Gray
+    Write-Host ""
+
+    do {
+        $choice = Read-Host "Select mode [1/2/3]"
+    } while ($choice -notmatch '^[123]$')
+
+    $mode = [int]$choice
+    Set-Mode -Mode $mode
+    Write-Host "Mode $mode saved to config_edge\mode.cfg" -ForegroundColor Green
+    return $mode
+}
 
 function Find-Edge {
     $paths = @(
@@ -97,6 +199,84 @@ if ($EncryptionAvailable -and $EncryptionStatus) {
     if ($EncryptionStatus.ContainerExists -and $EncryptionStatus.VeraCryptInstalled) {
         $UseEncryption = $true
     }
+}
+
+function New-SensitiveSymlinks {
+    param()
+    if (-not $script:EncryptedDir) { return $true }
+
+    Write-Host "Linking sensitive data to encrypted drive..." -ForegroundColor Cyan
+
+    foreach ($file in $SensitiveFiles) {
+        $linkPath = Join-Path $script:DataDir $file
+        $targetPath = Join-Path $script:EncryptedDir $file
+
+        $linkParent = Split-Path $linkPath -Parent
+        $targetParent = Split-Path $targetPath -Parent
+        if (-not (Test-Path $linkParent)) { New-Item -ItemType Directory -Path $linkParent -Force | Out-Null }
+        if (-not (Test-Path $targetParent)) { New-Item -ItemType Directory -Path $targetParent -Force | Out-Null }
+
+        $existing = Get-Item $linkPath -Force -ErrorAction SilentlyContinue
+        $attr = 0
+        if ($existing) { $attr = [int]$existing.Attributes }
+        $isReparse = ($attr -band 0x400) -ne 0
+
+        if ($existing -and -not $isReparse) {
+            Write-Host "  Migrating: $file" -ForegroundColor Gray
+            Copy-Item $linkPath $targetPath -Force -ErrorAction SilentlyContinue
+        }
+
+        Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
+
+        if ([Symlink]::CreateSymbolicLink($linkPath, $targetPath, 0)) {
+            Write-Host "  $file" -ForegroundColor Gray
+        } else {
+            Write-Host "  FAILED: $file" -ForegroundColor Red
+            return $false
+        }
+    }
+
+    foreach ($dir in $SensitiveDirs) {
+        $linkPath = Join-Path $script:DataDir $dir
+        $targetPath = Join-Path $script:EncryptedDir $dir
+
+        $linkParent = Split-Path $linkPath -Parent
+        $targetParent = Split-Path $targetPath -Parent
+        if (-not (Test-Path $linkParent)) { New-Item -ItemType Directory -Path $linkParent -Force | Out-Null }
+        if (-not (Test-Path $targetParent)) { New-Item -ItemType Directory -Path $targetParent -Force | Out-Null }
+
+        $existing = Get-Item $linkPath -Force -ErrorAction SilentlyContinue
+        $attr = 0
+        if ($existing) { $attr = [int]$existing.Attributes }
+        $isReparse = ($attr -band 0x400) -ne 0
+
+        if ($existing -and -not $isReparse) {
+            Write-Host "  Migrating dir: $dir" -ForegroundColor Gray
+            New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+            Start-Process -FilePath "robocopy.exe" -ArgumentList @(
+                "`"$linkPath`"", "`"$targetPath`"",
+                "/E", "/MOVE", "/R:0", "/W:0",
+                "/NFL", "/NDL", "/NJH", "/NJS"
+            ) -Wait -NoNewWindow
+            Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        if (-not (Test-Path $targetPath)) {
+            New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+        }
+
+        if ([Symlink]::CreateSymbolicLink($linkPath, $targetPath, 1)) {
+            Write-Host "  $dir\" -ForegroundColor Gray
+        } else {
+            Write-Host "  FAILED: $dir" -ForegroundColor Red
+            return $false
+        }
+    }
+
+    Write-Host "Sensitive data symlinks ready." -ForegroundColor Green
+    return $true
 }
 
 function New-LocalCacheSymlinks {
@@ -164,14 +344,24 @@ function Mount-EncryptedDataDir {
     Start-Sleep -Seconds 1
 
     $EncryptedDataDir = Join-Path $mountedPath "EdgeUserData"
-    if (-not (Test-Path $EncryptedDataDir)) {
-        New-Item -ItemType Directory -Path $EncryptedDataDir -Force | Out-Null
+    $EncryptedPrivacyDir = Join-Path $mountedPath "SecureProfile"
+
+    Write-Host "Mode $Mode : " -NoNewline
+    switch ($Mode) {
+        1 { Write-Host "Full encryption" -ForegroundColor Cyan }
+        2 { Write-Host "Encrypted root + local cache" -ForegroundColor Cyan }
+        3 { Write-Host "Local root + encrypted privacy" -ForegroundColor Cyan }
     }
 
-    # Migrate old v2.5 SecureProfile data
+    # === Shared: migrate old version data ===
     $oldProfile = Join-Path $mountedPath "SecureProfile"
+    $oldEdge = Join-Path $mountedPath "SecureEdge"
+
     if (Test-Path $oldProfile) {
-        Write-Host "Migrating v2.5 data..." -ForegroundColor Yellow
+        Write-Host "Migrating old SecureProfile data..." -ForegroundColor Yellow
+        if (-not (Test-Path $EncryptedDataDir)) {
+            New-Item -ItemType Directory -Path $EncryptedDataDir -Force | Out-Null
+        }
         Start-Process -FilePath "robocopy.exe" -ArgumentList @(
             "`"$oldProfile`"", "`"$EncryptedDataDir`"",
             "/E", "/MOVE", "/R:0", "/W:0",
@@ -179,11 +369,11 @@ function Mount-EncryptedDataDir {
         ) -Wait -NoNewWindow
         Remove-Item $oldProfile -Recurse -Force -ErrorAction SilentlyContinue
     }
-
-    # Migrate old v2.2 SecureEdge data
-    $oldEdge = Join-Path $mountedPath "SecureEdge"
     if (Test-Path $oldEdge) {
-        Write-Host "Migrating v2.2 data..." -ForegroundColor Yellow
+        Write-Host "Migrating old SecureEdge data..." -ForegroundColor Yellow
+        if (-not (Test-Path $EncryptedDataDir)) {
+            New-Item -ItemType Directory -Path $EncryptedDataDir -Force | Out-Null
+        }
         Start-Process -FilePath "robocopy.exe" -ArgumentList @(
             "`"$oldEdge`"", "`"$EncryptedDataDir`"",
             "/E", "/MOVE", "/R:0", "/W:0",
@@ -192,45 +382,92 @@ function Mount-EncryptedDataDir {
         Remove-Item $oldEdge -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    # Migrate local EdgeUserData to encrypted drive (if it's a real directory)
-    $existing = Get-Item $LocalDataDir -Force -ErrorAction SilentlyContinue
-    $isReparse = $false
-    if ($existing) { $isReparse = ($existing.Attributes -band 0x400) -ne 0 }
+    # === Mode-specific setup ===
+    switch ($Mode) {
+        1 {
+            # Full encryption: everything on Y:\EdgeUserData
+            if (-not (Test-Path $EncryptedDataDir)) {
+                New-Item -ItemType Directory -Path $EncryptedDataDir -Force | Out-Null
+            }
 
-    if ($isReparse) {
-        Write-Host "Removing old symlink..." -ForegroundColor Yellow
-        Remove-Item $LocalDataDir -Recurse -Force
-    }
-    elseif ($existing) {
-        Write-Host "Migrating local user data to encrypted drive..." -ForegroundColor Cyan
-        Start-Process -FilePath "robocopy.exe" -ArgumentList @(
-            "`"$LocalDataDir`"", "`"$EncryptedDataDir`"",
-            "/E", "/MOVE", "/R:0", "/W:0",
-            "/NFL", "/NDL", "/NJH", "/NJS"
-        ) -Wait -NoNewWindow
+            $existing = Get-Item $LocalDataDir -Force -ErrorAction SilentlyContinue
+            if ($existing -and -not (($existing.Attributes -band 0x400) -ne 0)) {
+                Write-Host "Migrating local data to encrypted drive..." -ForegroundColor Cyan
+                Start-Process -FilePath "robocopy.exe" -ArgumentList @(
+                    "`"$LocalDataDir`"", "`"$EncryptedDataDir`"",
+                    "/E", "/MOVE", "/R:0", "/W:0",
+                    "/NFL", "/NDL", "/NJH", "/NJS"
+                ) -Wait -NoNewWindow
+            }
+            $script:DataDir = $EncryptedDataDir
+        }
 
-        # Clean up leftover symlinks and empty directories from migration
-        Get-ChildItem $LocalDataDir -Recurse -Force -ErrorAction SilentlyContinue |
-            Where-Object { ($_.Attributes -band 0x400) -ne 0 } |
-            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-        Get-ChildItem $LocalDataDir -Recurse -Directory -Force -ErrorAction SilentlyContinue |
-            Where-Object { (Get-ChildItem $_.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0 } |
-            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-    }
+        2 {
+            # Encrypted root + local cache: data on Y:, cache symlinks to local
+            if (-not (Test-Path $EncryptedDataDir)) {
+                New-Item -ItemType Directory -Path $EncryptedDataDir -Force | Out-Null
+            }
 
-    # Ensure local directory exists for cache targets
-    if (-not (Test-Path $LocalDataDir)) {
-        New-Item -ItemType Directory -Path $LocalDataDir -Force | Out-Null
-    }
+            $existing = Get-Item $LocalDataDir -Force -ErrorAction SilentlyContinue
+            $isReparse = $false
+            if ($existing) { $isReparse = ($existing.Attributes -band 0x400) -ne 0 }
 
-    # Override DataDir to encrypted location
-    $script:DataDir = $EncryptedDataDir
+            if ($isReparse) {
+                Write-Host "Removing old symlink..." -ForegroundColor Yellow
+                Remove-Item $LocalDataDir -Recurse -Force
+            }
+            elseif ($existing) {
+                Write-Host "Migrating local data to encrypted drive..." -ForegroundColor Cyan
+                Start-Process -FilePath "robocopy.exe" -ArgumentList @(
+                    "`"$LocalDataDir`"", "`"$EncryptedDataDir`"",
+                    "/E", "/MOVE", "/R:0", "/W:0",
+                    "/NFL", "/NDL", "/NJH", "/NJS"
+                ) -Wait -NoNewWindow
+                Get-ChildItem $LocalDataDir -Recurse -Force -ErrorAction SilentlyContinue |
+                    Where-Object { ($_.Attributes -band 0x400) -ne 0 } |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                Get-ChildItem $LocalDataDir -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+                    Where-Object { (Get-ChildItem $_.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0 } |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
 
-    # Create cache symlinks (Y: → local)
-    if (-not (New-LocalCacheSymlinks)) {
-        Write-Host "Cache symlink creation failed." -ForegroundColor Red
-        Dismount-Container -DriveLetter "Y" -Force
-        return $false
+            if (-not (Test-Path $LocalDataDir)) {
+                New-Item -ItemType Directory -Path $LocalDataDir -Force | Out-Null
+            }
+
+            $script:DataDir = $EncryptedDataDir
+
+            if (-not (New-LocalCacheSymlinks)) {
+                Write-Host "Cache symlink creation failed." -ForegroundColor Red
+                Dismount-Container -DriveLetter "Y" -Force
+                return $false
+            }
+        }
+
+        3 {
+            # Local root + encrypted privacy: data locally, sensitive files symlinked to Y:
+            if (-not (Test-Path $EncryptedPrivacyDir)) {
+                New-Item -ItemType Directory -Path $EncryptedPrivacyDir -Force | Out-Null
+            }
+
+            $existing = Get-Item $LocalDataDir -Force -ErrorAction SilentlyContinue
+            if ($existing -and ($existing.Attributes -band 0x400)) {
+                Write-Host "Removing old junction..." -ForegroundColor Yellow
+                Remove-Item $LocalDataDir -Recurse -Force
+            }
+            if (-not (Test-Path $LocalDataDir)) {
+                New-Item -ItemType Directory -Path $LocalDataDir -Force | Out-Null
+            }
+
+            $script:EncryptedDir = $EncryptedPrivacyDir
+            $script:DataDir = $LocalDataDir
+
+            if (-not (New-SensitiveSymlinks)) {
+                Write-Host "Sensitive symlink creation failed." -ForegroundColor Red
+                Dismount-Container -DriveLetter "Y" -Force
+                return $false
+            }
+        }
     }
 
     return $true
@@ -253,11 +490,13 @@ function Dismount-EncryptedDataDir {
 $BrowserArgs = @()
 $doSetupPassword = $false
 $doSetupEncryption = $false
+$doSetupMode = $false
 
 foreach ($arg in $Arguments) {
     if ($arg -match "setup-password") { $doSetupPassword = $true }
     elseif ($arg -match "setup-encryption") { $doSetupEncryption = $true }
-    elseif ($arg -notmatch "^--(setup-encryption|setup-password|help)$" -and $arg -ne "--%") {
+    elseif ($arg -match "setup-mode") { $doSetupMode = $true }
+    elseif ($arg -notmatch "^--(setup-encryption|setup-password|setup-mode|help)$" -and $arg -ne "--%") {
         $BrowserArgs += $arg
     }
 }
@@ -271,6 +510,16 @@ if ($doSetupEncryption) {
     if ($EncryptionAvailable) { Initialize-Encryption }
     else { Write-Host "Encryption module not available." -ForegroundColor Red }
     exit $LASTEXITCODE
+}
+
+# Mode selection
+$Mode = Get-SavedMode
+if ($doSetupMode -or -not $Mode) {
+    if (-not $Mode) {
+        Write-Host "No storage mode configured. Running first-time setup..." -ForegroundColor Yellow
+    }
+    $Mode = Select-Mode
+    if ($doSetupMode) { exit 0 }
 }
 
 $EdgeExe = Find-Edge

@@ -4,8 +4,9 @@ UserData.hc
 # VeraCrypt portable binaries
 veracrypt/
 
-# User config / password hash
+# User config
 config_edge/password_edge.enc
+config_edge/mode.cfg
 
 # Local Edge user data (runtime, not tracked)
 EdgeUserData/
