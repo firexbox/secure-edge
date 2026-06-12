@@ -1,5 +1,5 @@
 # Secure Edge Launcher for Windows
-# Version 2.4 - Win32 CreateSymbolicLink (no placeholder files needed)
+# Version 2.5 - Local cache offloading + Win32 CreateSymbolicLink
 
 param(
     [Parameter(ValueFromRemainingArguments=$true)]
@@ -112,6 +112,21 @@ $SensitiveDirs = @(
     "Default\Site Characteristics Database"
 )
 
+# Local cache root directory (on launch script disk, not encrypted)
+$LocalCacheRoot = Join-Path $ScriptDir "EdgeCache"
+
+# Cache directories symlinked to local disk (dwFlags=1, directory symlinks)
+# These can grow >100MB and are disposable -- keeping them off the encrypted volume
+$LocalCacheDirs = @(
+    "Default\Cache",
+    "Default\Code Cache",
+    "Default\AutofillAiModelCache",
+    "Default\optimization_guide_hint_cache_store",
+    "GPUPersistentCache",
+    "extensions_crx_cache",
+    "component_crx_cache"
+)
+
 function Find-Edge {
     $paths = @(
         "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
@@ -211,6 +226,66 @@ function New-SensitiveSymlinks {
     }
 
     Write-Host "Symlinks ready." -ForegroundColor Green
+    return $true
+}
+
+function New-LocalCacheSymlinks {
+    param()
+
+    Write-Host "Linking cache directories to local disk..." -ForegroundColor Cyan
+
+    if (-not (Test-Path $LocalCacheRoot)) {
+        New-Item -ItemType Directory -Path $LocalCacheRoot -Force | Out-Null
+    }
+
+    foreach ($dir in $LocalCacheDirs) {
+        $linkPath = Join-Path $script:DataDir $dir
+        $targetPath = Join-Path $LocalCacheRoot $dir
+
+        $linkParent = Split-Path $linkPath -Parent
+        $targetParent = Split-Path $targetPath -Parent
+        if (-not (Test-Path $linkParent)) {
+            New-Item -ItemType Directory -Path $linkParent -Force | Out-Null
+        }
+        if (-not (Test-Path $targetParent)) {
+            New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+        }
+
+        $existing = Get-Item $linkPath -Force -ErrorAction SilentlyContinue
+        $attr = 0
+        if ($existing) { $attr = [int]$existing.Attributes }
+        $isReparse = ($attr -band 0x400) -ne 0
+
+        if ($isReparse) {
+            Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        elseif ($existing -and -not $isReparse) {
+            Write-Host "  Migrating cache: $dir" -ForegroundColor Gray
+            if (-not (Test-Path $targetPath)) {
+                New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+            }
+            Start-Process -FilePath "robocopy.exe" -ArgumentList @(
+                "`"$linkPath`"", "`"$targetPath`"",
+                "/E", "/MOVE", "/R:0", "/W:0",
+                "/NFL", "/NDL", "/NJH", "/NJS"
+            ) -Wait -NoNewWindow
+            Remove-Item $linkPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        if (-not (Test-Path $targetPath)) {
+            New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+        }
+
+        if ([Symlink]::CreateSymbolicLink($linkPath, $targetPath, 1)) {
+            Write-Host "  $dir  ->  EdgeCache\" -ForegroundColor Gray
+        } else {
+            $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Write-Host "  FAILED: $dir (Win32 error $err)" -ForegroundColor Red
+            return $false
+        }
+    }
+
+    Write-Host "Cache directories linked to local disk." -ForegroundColor Green
     return $true
 }
 
@@ -326,6 +401,12 @@ if (Test-Path $PasswordFile) {
     exit 0
 }
 
+# Set up local cache symlinks (runs regardless of encryption)
+if (-not (New-LocalCacheSymlinks)) {
+    Write-Host "WARNING: Some cache directories could not be linked to local disk." -ForegroundColor Yellow
+    Write-Host "Edge will still launch, but cache may consume encrypted volume space." -ForegroundColor Yellow
+}
+
 try {
     Add-Type -Name Window -Namespace Console -MemberDefinition '
         [DllImport("Kernel32.dll")] public static extern IntPtr GetConsoleWindow();
@@ -339,8 +420,7 @@ $allArgs = @(
     "--user-data-dir=`"$script:DataDir`"",
     "--no-first-run",
     "--disk-cache-size=104857600",
-    "--media-cache-size=52428800",
-    "--disable-gpu-shader-disk-cache"
+    "--media-cache-size=52428800"
 ) + $BrowserArgs
 Write-Host "Launching Secure Edge..." -ForegroundColor Green
 Start-Process -FilePath $EdgeExe -ArgumentList $allArgs | Out-Null

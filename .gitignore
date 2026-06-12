@@ -7,6 +7,9 @@ veracrypt/
 # User config / password hash
 config_edge/password_edge.enc
 
+# Local Edge cache (disposable, symlinked from EdgeUserData)
+EdgeCache/
+
 # PowerShell / Windows
 *.lnk
 Thumbs.db
